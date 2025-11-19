@@ -25,21 +25,31 @@ class Predictor:
         self.preprocessor = preprocessor
         self.target_scaler = target_scaler
     
-    def predict(self, X: np.ndarray) -> np.ndarray:
+    def predict(self, X: np.ndarray, previous_prices: Optional[np.ndarray] = None) -> np.ndarray:
         """
         예측 수행
         
         Args:
             X: 입력 데이터 (n_samples, window_size, n_features)
+            previous_prices: 이전 가격 (변화율을 절대 가격으로 변환하기 위해 필요)
+                            None이면 y_original에서 추출
         
         Returns:
-            예측값 (원본 스케일)
+            예측값 (원본 스케일 - 절대 가격)
         """
-        # 예측
-        y_pred_scaled = self.model.predict(X, verbose=0)
+        # 예측 (변화율)
+        y_pred_change_scaled = self.model.predict(X, verbose=0)
         
-        # 원본 스케일로 변환
-        y_pred = self.target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+        # 변화율로 역변환
+        y_pred_change = self.target_scaler.inverse_transform(y_pred_change_scaled.reshape(-1, 1)).flatten()
+        
+        # 변화율을 절대 가격으로 변환
+        if previous_prices is not None:
+            # 이전 가격이 제공되면 그것을 사용
+            y_pred = previous_prices * (1 + y_pred_change)
+        else:
+            # 이전 가격이 없으면 에러 (main.py에서 제공해야 함)
+            raise ValueError("변화율 예측을 절대 가격으로 변환하려면 previous_prices가 필요합니다.")
         
         return y_pred
     

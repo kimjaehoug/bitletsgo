@@ -116,17 +116,64 @@ def main():
         scaler_type='robust'  # RobustScaler로 변경 (이상치에 강함)
     )
     
-    # Train 데이터로만 스케일러 학습 (실시간 예측 고려)
-    # 먼저 Train 데이터만 분할하여 스케일러 학습
-    split_idx_train = int(len(df_features) * 0.6)
-    df_train_for_scaler = df_features.iloc[:split_idx_train].copy()
+    # 전체 데이터를 먼저 시퀀스로 변환 (스케일링 전)
+    # 시퀀스 생성은 전체 데이터로 해야 함 (시간 순서 유지)
+    print("전체 데이터로 시퀀스 생성 중...")
     
-    # Train 데이터로 스케일러 학습 후 전체 데이터 처리
-    X, y, feature_names, y_original = preprocessor.prepare_data(
-        df_features, 
-        fit_scaler=True,
-        train_data=df_train_for_scaler  # Train 데이터로만 스케일러 학습
-    )
+    # 원본 데이터로 시퀀스 생성 (스케일링 전)
+    # 미래 데이터 누수 방지
+    df_clean = preprocessor._remove_future_leakage(df_features)
+    feature_cols = preprocessor._select_features(df_clean)
+    feature_data = df_clean[feature_cols].values
+    target_data = df_clean[preprocessor.target_column].values
+    
+    # 결측치 처리
+    feature_df = pd.DataFrame(feature_data, columns=feature_cols)
+    feature_df = feature_df.ffill().bfill().fillna(0)
+    feature_data = feature_df.values
+    
+    target_series = pd.Series(target_data)
+    target_series = target_series.ffill().bfill().fillna(0)
+    target_data = target_series.values
+    
+    # 타겟을 차분(변화율)로 변환하여 비정상성 제거
+    # 절대 가격 대신 변화율을 예측하면 Train/Val 분포 차이 문제 해결
+    print("타겟을 변화율로 변환 중...")
+    target_prev = np.roll(target_data, 1)
+    target_prev[0] = target_data[0]  # 첫 번째 값은 자기 자신
+    target_change = (target_data - target_prev) / (target_prev + 1e-8)  # 변화율
+    target_change = np.clip(target_change, -0.5, 0.5)  # 극단값 제한
+    
+    # 시퀀스 생성 (변화율 타겟 사용)
+    X_raw, y_raw = preprocessor.create_sequences(feature_data, target_change)
+    y_original = preprocessor.create_sequences(feature_data, target_data)[1]  # 원본 가격은 평가용으로 저장
+    
+    print(f"생성된 시퀀스: {X_raw.shape}, 타겟(변화율): {y_raw.shape}")
+    print(f"변화율 타겟 범위: [{y_raw.min():.4f}, {y_raw.max():.4f}], 평균: {y_raw.mean():.4f}, std: {y_raw.std():.4f}")
+    
+    # Train 데이터로만 스케일러 학습
+    split_idx_train = int(len(X_raw) * 0.6)
+    X_train_raw = X_raw[:split_idx_train]
+    y_train_raw = y_raw[:split_idx_train]
+    
+    # Train 데이터의 특징과 타겟을 평탄화하여 스케일러 학습
+    n_train_samples, n_timesteps, n_features = X_train_raw.shape
+    X_train_flat = X_train_raw.reshape(-1, n_features)
+    
+    # 스케일러 학습
+    preprocessor.scaler.fit(X_train_flat)
+    preprocessor.target_scaler.fit(y_train_raw.reshape(-1, 1))
+    preprocessor.is_fitted = True
+    
+    # 전체 데이터 스케일링 (전체 데이터의 shape 사용)
+    n_total_samples, n_timesteps_total, n_features_total = X_raw.shape
+    X_flat = X_raw.reshape(-1, n_features_total)
+    X_scaled_flat = preprocessor.scaler.transform(X_flat)
+    X = X_scaled_flat.reshape(n_total_samples, n_timesteps_total, n_features_total)
+    
+    y = preprocessor.target_scaler.transform(y_raw.reshape(-1, 1)).flatten()
+    
+    feature_names = feature_cols
     print(f"시퀀스 데이터 shape: {X.shape}")
     print(f"타겟 데이터 shape: {y.shape}")
     print(f"특징 개수: {len(feature_names)}")
@@ -162,12 +209,10 @@ def main():
         input_shape=(window_size, len(feature_names)),
         num_features=len(feature_names),
         patch_size=5,
-        cnn_filters=[32, 64, 128],  # CNN 필터
-        lstm_units=128,  # LSTM 유닛 (표현력 향상)
-        dropout_rate=0.3,  # 드롭아웃
-        learning_rate=0.0005,  # 학습률
-        use_attention=True,  # Attention 메커니즘 (비정상 시계열 대응)
-        use_residual=True  # Residual connection (깊은 네트워크 학습 개선)
+        cnn_filters=[32, 64],  # 간단한 CNN (2 레이어만)
+        lstm_units=128,  # LSTM 유닛
+        dropout_rate=0.2,  # 드롭아웃 (학습 개선)
+        learning_rate=0.001  # 학습률
     )
     
     model = model_builder.build_model()
@@ -187,6 +232,40 @@ def main():
     print(f"  y_train 범위: [{y_train.min():.4f}, {y_train.max():.4f}], 평균: {y_train.mean():.4f}, std: {y_train.std():.4f}")
     print(f"  y_val 범위: [{y_val.min():.4f}, {y_val.max():.4f}], 평균: {y_val.mean():.4f}, std: {y_val.std():.4f}")
     print(f"  X_train 범위: [{X_train.min():.4f}, {X_train.max():.4f}], 평균: {X_train.mean():.4f}, std: {X_train.std():.4f}")
+    
+    # 원본 타겟 통계 (스케일링 전)
+    print(f"\n원본 타겟 통계:")
+    print(f"  y_train_orig 범위: [{y_train_orig.min():.2f}, {y_train_orig.max():.2f}], 평균: {y_train_orig.mean():.2f}, std: {y_train_orig.std():.2f}")
+    print(f"  y_val_orig 범위: [{y_val_orig.min():.2f}, {y_val_orig.max():.2f}], 평균: {y_val_orig.mean():.2f}, std: {y_val_orig.std():.2f}")
+    
+    # 스케일러 정보 확인
+    print(f"\n스케일러 정보:")
+    print(f"  Target Scaler mean: {preprocessor.target_scaler.mean_[0]:.4f}, scale: {preprocessor.target_scaler.scale_[0]:.4f}")
+    
+    # 경고: Train과 Val의 분포가 다르면 문제
+    if abs(y_train.mean()) > 0.1 or abs(y_train.std() - 1.0) > 0.1:
+        print(f"\n⚠️ 경고: Train 데이터가 제대로 정규화되지 않았습니다!")
+    if abs(y_val.mean()) > 1.0 or abs(y_val.std() - 1.0) > 0.5:
+        print(f"⚠️ 경고: Val 데이터가 Train과 다른 분포입니다! (Train 스케일러로 변환 시 문제)")
+        print(f"   이는 Train과 Val이 서로 다른 시장 환경(가격 범위)을 나타내기 때문입니다.")
+        print(f"   해결: 차분(Differencing) 또는 로그 변환을 고려하세요.")
+    
+    # 변화율 타겟 확인
+    print(f"\n변화율 타겟 확인:")
+    print(f"  Train 변화율 범위: [{y_train.min():.4f}, {y_train.max():.4f}], 평균: {y_train.mean():.4f}, std: {y_train.std():.4f}")
+    print(f"  Val 변화율 범위: [{y_val.min():.4f}, {y_val.max():.4f}], 평균: {y_val.mean():.4f}, std: {y_val.std():.4f}")
+    if abs(y_train.mean()) < 0.01 and abs(y_val.mean()) < 0.01:
+        print(f"  ✓ 변화율 타겟이 잘 정규화되었습니다 (평균이 0에 가까움)")
+    else:
+        print(f"  ⚠️ 변화율 타겟의 평균이 0에서 멀리 떨어져 있습니다.")
+    
+    # Val 데이터의 분포가 Train과 다른지 확인
+    val_std_ratio = y_val.std() / y_train.std() if y_train.std() > 0 else 0
+    if abs(val_std_ratio - 1.0) > 0.3:
+        print(f"\n⚠️ 경고: Val 데이터의 분포가 Train과 다릅니다!")
+        print(f"   Train std: {y_train.std():.4f}, Val std: {y_val.std():.4f}, 비율: {val_std_ratio:.4f}")
+        print(f"   이는 Val 데이터가 Train과 다른 시장 환경을 나타내거나, 스케일링 문제일 수 있습니다.")
+        print(f"   해결: Val 데이터도 Train 스케일러로 변환되었는지 확인하세요.")
     
     history = trainer.train(
         X_train, y_train,
@@ -217,13 +296,41 @@ def main():
         target_scaler=preprocessor.target_scaler
     )
     
-    # 테스트 데이터 예측
+    # 테스트 데이터 예측 (변화율 → 절대 가격 변환)
     print("\n예측 수행 중...")
-    predictions_test = predictor.predict(X_test)
+    # 이전 가격: 각 시퀀스의 마지막 시점 직전 가격
+    # y_original[i]는 X[i] 시퀀스의 타겟 가격이므로, 
+    # 예측하려는 시점 직전 가격은 y_original[i-1] (첫 번째는 자기 자신)
+    # 하지만 시퀀스 생성 시 window_size만큼 건너뛰므로 정확한 매핑 필요
+    
+    # 간단한 방법: y_original에서 각 시퀀스에 대응하는 이전 가격 추출
+    # 시퀀스 i의 타겟은 원본 데이터의 window_size + prediction_horizon - 1 + i 인덱스
+    # 따라서 이전 가격은 window_size + prediction_horizon - 2 + i 인덱스
+    start_idx = window_size + prediction_horizon - 1
+    
+    # Train/Val/Test 분할에 맞춰 이전 가격 추출
+    test_start = start_idx + split_idx_2
+    val_start = start_idx + split_idx_1
+    
+    # 이전 가격: 예측 시점 직전 가격
+    test_prev_indices = np.arange(test_start - 1, test_start - 1 + len(X_test))
+    val_prev_indices = np.arange(val_start - 1, val_start - 1 + len(X_val))
+    
+    # 원본 데이터에서 이전 가격 추출
+    test_prev_prices = target_data[test_prev_indices]
+    val_prev_prices = target_data[val_prev_indices]
+    
+    # 길이 확인 및 조정
+    if len(test_prev_prices) != len(X_test):
+        test_prev_prices = test_prev_prices[:len(X_test)]
+    if len(val_prev_prices) != len(X_val):
+        val_prev_prices = val_prev_prices[:len(X_val)]
+    
+    predictions_test = predictor.predict(X_test, previous_prices=test_prev_prices)
     actuals_test = y_test_orig
     
     # 검증 데이터 예측
-    predictions_val = predictor.predict(X_val)
+    predictions_val = predictor.predict(X_val, previous_prices=val_prev_prices)
     actuals_val = y_val_orig
     
     # 예측값 통계 출력 (디버깅)

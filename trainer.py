@@ -56,6 +56,21 @@ class ModelTrainer:
         Returns:
             학습 히스토리
         """
+        # 초기 예측 확인 (학습 전)
+        print("\n=== 학습 전 모델 상태 확인 ===")
+        initial_pred_train = self.model.predict(X_train[:100], verbose=0).flatten()
+        initial_pred_val = self.model.predict(X_val[:100], verbose=0).flatten()
+        print(f"초기 예측 (스케일링된 값):")
+        print(f"  Train 예측 범위: [{initial_pred_train.min():.4f}, {initial_pred_train.max():.4f}], 평균: {initial_pred_train.mean():.4f}")
+        print(f"  Val 예측 범위: [{initial_pred_val.min():.4f}, {initial_pred_val.max():.4f}], 평균: {initial_pred_val.mean():.4f}")
+        print(f"  Train 실제 범위: [{y_train[:100].min():.4f}, {y_train[:100].max():.4f}], 평균: {y_train[:100].mean():.4f}")
+        print(f"  Val 실제 범위: [{y_val[:100].min():.4f}, {y_val[:100].max():.4f}], 평균: {y_val[:100].mean():.4f}")
+        
+        # 상관관계 확인
+        train_corr = np.corrcoef(initial_pred_train, y_train[:100])[0, 1]
+        val_corr = np.corrcoef(initial_pred_val, y_val[:100])[0, 1]
+        print(f"초기 상관관계: Train={train_corr:.4f}, Val={val_corr:.4f}")
+        
         # 콜백 설정
         callbacks = self._create_callbacks()
         
@@ -69,6 +84,20 @@ class ModelTrainer:
             verbose=verbose,
             shuffle=False  # 시계열 데이터는 셔플하지 않음
         )
+        
+        # 학습 후 예측 확인
+        print("\n=== 학습 후 모델 상태 확인 ===")
+        final_pred_train = self.model.predict(X_train[:100], verbose=0).flatten()
+        final_pred_val = self.model.predict(X_val[:100], verbose=0).flatten()
+        print(f"최종 예측 (스케일링된 값):")
+        print(f"  Train 예측 범위: [{final_pred_train.min():.4f}, {final_pred_train.max():.4f}], 평균: {final_pred_train.mean():.4f}")
+        print(f"  Val 예측 범위: [{final_pred_val.min():.4f}, {final_pred_val.max():.4f}], 평균: {final_pred_val.mean():.4f}")
+        
+        # 상관관계 확인
+        train_corr_final = np.corrcoef(final_pred_train, y_train[:100])[0, 1]
+        val_corr_final = np.corrcoef(final_pred_val, y_val[:100])[0, 1]
+        print(f"최종 상관관계: Train={train_corr_final:.4f}, Val={val_corr_final:.4f}")
+        print(f"상관관계 변화: Train={train_corr_final-train_corr:.4f}, Val={val_corr_final-val_corr:.4f}")
         
         return self.history.history
     
